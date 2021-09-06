@@ -1,11 +1,16 @@
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 
 fn main() -> Result<()> {
     let options = Options::from_args();
     let presets_filename = options.presets;
     let work_dir = presets_filename.parent().unwrap();
+    let mut preselected_filename = work_dir.to_path_buf();
+    preselected_filename.push(".bob");
+    let preselected = read_preselected(&preselected_filename).unwrap_or(PreSelected {
+        preselected: vec![],
+    });
     let work_dir =
         dunce::canonicalize(work_dir).context("Failed to canonicalize working directory")?;
     let presets_json =
@@ -17,8 +22,8 @@ fn main() -> Result<()> {
         .into_iter()
         .filter(|p| !p.hidden && p.binary_dir.is_some())
         .collect();
-    let presets = select_presets(&visible_presets);
-    for preset in presets {
+    let presets: Vec<_> = select_presets(&visible_presets, preselected.preselected).collect();
+    for preset in presets.iter() {
         println!("----- {} -----", &preset.display_name.as_ref().unwrap());
         config_and_build(
             &preset.name,
@@ -26,6 +31,8 @@ fn main() -> Result<()> {
             &work_dir,
         )?;
     }
+    let preset_names : Vec<_> = presets.iter().map(|p| p.name.clone()).collect();
+    write_preselected(&preselected_filename, preset_names)?;
     Ok(())
 }
 
@@ -46,18 +53,39 @@ struct Preset {
     hidden: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct PreSelected {
+    preselected: Vec<String>,
+}
+
 #[derive(StructOpt)]
 struct Options {
     presets: std::path::PathBuf,
 }
 
-fn select_presets(visible_presets: &[Preset]) -> impl Iterator<Item = &Preset> {
-    let names: Vec<_> = visible_presets
+fn read_preselected(filename: &std::path::Path) -> Result<PreSelected> {
+    let json = std::fs::read_to_string(filename)?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+fn write_preselected(filename: &std::path::Path, names: Vec<String>) -> Result<()> {
+    let json = serde_json::to_string(&PreSelected{preselected: names})?;
+    std::fs::write(filename, json)?;
+    Ok(())
+}
+
+fn select_presets(visible_presets: &[Preset], selected: Vec<String>) -> impl Iterator<Item = &Preset> {
+    let items: Vec<_> = visible_presets
         .iter()
-        .map(|p| p.display_name.as_ref().unwrap_or_else(|| &p.name).as_str())
+        .map(|p| {
+            (
+                p.display_name.as_ref().unwrap_or_else(|| &p.name).as_str(),
+                selected.contains(&p.name),
+            )
+        })
         .collect();
     let chosen = dialoguer::MultiSelect::new()
-        .items(&names)
+        .items_checked(&items)
         .with_prompt("Select presets to build (cursor up/down, space, return)")
         .interact()
         .unwrap();
